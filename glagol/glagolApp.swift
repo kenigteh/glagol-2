@@ -62,6 +62,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// защита от инжекции в чужое поле).
     private var transcribeTask: Task<Void, Never>?
 
+    /// Анимация прогресса транскрипции — печатается прямо в строку ввода пока
+    /// модель обрабатывает аудио, чтобы юзер видел что процесс идёт.
+    /// Цикл `progressFrames` через `injector` (diff сам стирает/печатает).
+    /// Показывается ТОЛЬКО на время transcribe, не во время записи.
+    private var progressTimer: Timer?
+    private var progressPhase: Int = 0
+    private static let progressFrames = [".", "..", "...", ""]
+    private static let progressTickSec: TimeInterval = 0.35
+
     // IUO: набивается в applicationDidFinishLaunching, до этого NSStatusBar ещё нет.
     private var statusItem: NSStatusItem!
     private var iconView: PassThroughImageView!
@@ -155,6 +164,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Без явного teardown'а CGEventTap / AVAudioEngine процесс полагается на
         // OS-cleanup. Документируем интент даже если ARC + process exit это сделают.
+        progressTimer?.invalidate()
+        transcribeTask?.cancel()
         if recorder.isRecording { recorder.stop() }
         hotkey.stopMonitoring()
         asr.shutdown()
@@ -244,10 +255,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 // Транзиция «не писали → начали писать»: прерываем в-полёте
                 // transcribe (если есть) — мы стартовали новую запись, прошлый
-                // результат уже не нужен.
+                // результат уже не нужен. Стираем точки прогресс-анимации
+                // если они ещё в поле (синхронно, до начала записи).
                 if !prev && curr {
                     self.transcribeTask?.cancel()
                     self.transcribeTask = nil
+                    self.stopProgressAnimation(clear: true)
                 }
             }
             .store(in: &cancellables)
@@ -345,7 +358,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func beginRecordingSession() {
         micPermissionDenied = false
-        injector.reset()
+        // injector.reset() здесь НЕ вызываем: если в поле остались точки
+        // прогресс-анимации от предыдущего (отменённого) transcribe, их нужно
+        // стереть через diff — а reset() забыл бы про них и точки остались бы.
+        // Стирание делает `stopProgressAnimation(clear: true)` в subscription
+        // при транзиции записи false→true.
         recorder.start()
     }
 
@@ -371,6 +388,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         asrStatus = "Транскрибирую…"
         rebuildMenu()
 
+        // Чистый старт injector'а + анимация точек прямо в строке ввода.
+        injector.reset()
+        startProgressAnimation()
+
         transcribeTask?.cancel()
         transcribeTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -390,16 +411,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // растёт с длиной записи (58с аудио → ~6.5с transcribe),
                 // фиксированный порог ложно срабатывал и текст не вставлялся.
                 // Юзер ОЖИДАЕТ результат после диктовки — инжектим когда придёт.
-                if Task.isCancelled { return }
-                guard !text.isEmpty else { return }
+                if Task.isCancelled {
+                    self.stopProgressAnimation(clear: true)
+                    return
+                }
+                guard !text.isEmpty else {
+                    self.stopProgressAnimation(clear: true)
+                    return
+                }
+                // Останавливаем анимацию БЕЗ стирания: `update(to: text)` сам
+                // сделает diff от текущих точек (backspace точек + печать текста)
+                // одной операцией — без мигания пустотой между ними.
+                self.stopProgressAnimation(clear: false)
                 self.injector.update(to: text)
                 self.injector.reset()
             } catch {
+                self.stopProgressAnimation(clear: true)
                 if !Task.isCancelled {
                     qwenAppLog.error("transcribe failed: \(error.localizedDescription)")
                     self.asrError = error.localizedDescription
                 }
             }
+        }
+    }
+
+    // MARK: - Progress animation (точки в строке ввода во время transcribe)
+
+    /// Запускает анимацию `.` → `..` → `...` → (пусто) → цикл прямо в активном
+    /// поле через `injector`. Каждый кадр — `injector.update(to:)`, который
+    /// diff'ом стирает старые точки и печатает новые. Вызывать на main.
+    private func startProgressAnimation() {
+        progressPhase = 0
+        injector.update(to: Self.progressFrames[0])  // мгновенная реакция
+        progressTimer?.invalidate()
+        progressTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.progressTickSec, repeats: true
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.progressPhase = (self.progressPhase + 1) % Self.progressFrames.count
+                self.injector.update(to: Self.progressFrames[self.progressPhase])
+            }
+        }
+    }
+
+    /// Останавливает таймер анимации. Если `clear` — стирает текущие точки из
+    /// поля (`update(to: "")`). При успешном transcribe передаём `clear: false`,
+    /// чтобы последующий `update(to: text)` сам убрал точки одним diff'ом.
+    private func stopProgressAnimation(clear: Bool) {
+        progressTimer?.invalidate()
+        progressTimer = nil
+        if clear {
+            injector.update(to: "")
+            injector.reset()
         }
     }
 
