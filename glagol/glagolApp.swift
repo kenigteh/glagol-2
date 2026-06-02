@@ -57,16 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Статус mic-permission. `nil` пока не проверили; `true/false` после первой попытки.
     var micPermissionDenied: Bool = false
 
-    /// Deadline для поздней инжекции после остановки записи. Если transcribe
-    /// занял дольше — юзер уже мог переключиться в другое поле, нажать
-    /// «Отправить» в Telegram и пр. — инжектить нельзя, сломаем чужой текст.
-    /// MLX 1.7B транскрибит 30-сек запись за ~1.5с warm, 5с — безопасный лимит
-    /// для самых длинных диктовок (≤ 2 мин).
-    private static let postStopInjectionGraceSec: TimeInterval = 5.0
-    private var stopDeadline: Date?
-
-    /// Активный transcribe-Task. Нужно отслеживать чтобы не запустить два
-    /// параллельных при быстрой смене записей.
+    /// Активный transcribe-Task. Отслеживаем чтобы при старте новой записи
+    /// отменить предыдущий transcribe (его результат уже не нужен — это и есть
+    /// защита от инжекции в чужое поле).
     private var transcribeTask: Task<Void, Never>?
 
     // IUO: набивается в applicationDidFinishLaunching, до этого NSStatusBar ещё нет.
@@ -247,14 +240,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Транзиция «писали → перестали писать»: запускаем batch
                 // transcribe на накопленном аудио.
                 if prev && !curr {
-                    self.stopDeadline = Date().addingTimeInterval(Self.postStopInjectionGraceSec)
                     self.startTranscribe()
                 }
-                // Транзиция «не писали → начали писать»: сброс deadline.
+                // Транзиция «не писали → начали писать»: прерываем в-полёте
+                // transcribe (если есть) — мы стартовали новую запись, прошлый
+                // результат уже не нужен.
                 if !prev && curr {
-                    self.stopDeadline = nil
-                    // Прерываем в-полёте transcribe (если есть) — мы стартовали
-                    // новую запись, прошлый результат уже не нужен.
                     self.transcribeTask?.cancel()
                     self.transcribeTask = nil
                 }
@@ -390,17 +381,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             do {
                 let text = try await self.asr.transcribe(audio: audio)
-                // Если в-полёте отменили (юзер успел стартовать новую запись) —
-                // ничего не делаем.
+                // Если в-полёте отменили — юзер успел стартовать новую запись,
+                // старый результат уже не нужен. Это ЕДИНСТВЕННАЯ защита от
+                // инжекции в чужое поле в batch-режиме, и её достаточно:
+                // новая запись отменяет старый transcribe.
+                //
+                // Time-based дедлайн НЕ используем: в batch время transcribe
+                // растёт с длиной записи (58с аудио → ~6.5с transcribe),
+                // фиксированный порог ложно срабатывал и текст не вставлялся.
+                // Юзер ОЖИДАЕТ результат после диктовки — инжектим когда придёт.
                 if Task.isCancelled { return }
                 guard !text.isEmpty else { return }
-                // Late-injection guard: если transcribe затянулся > 5с после
-                // stop'а, юзер уже мог переключиться/отправить сообщение и пр.
-                // Инжектить нельзя — порвём чужой текст.
-                if let dl = self.stopDeadline, Date() > dl {
-                    qwenAppLog.notice("transcribe done past stop-deadline, skipping injection")
-                    return
-                }
                 self.injector.update(to: text)
                 self.injector.reset()
             } catch {
