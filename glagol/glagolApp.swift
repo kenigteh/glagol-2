@@ -48,6 +48,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let asr: BatchASR
     let injector = TextInjector()
 
+    /// Плавающий overlay диктовки (waveform + кнопки пауза/стоп). Показывается
+    /// когда запись реально пошла, прячется на стопе. Создаётся лениво в
+    /// `applicationDidFinishLaunching` (нужен @MainActor контекст).
+    private var overlay: DictationOverlayController?
+
     /// Состояние ASR для меню. Не @Published — никто не подписывается, callbacks
     /// сами дёргают `rebuildMenu()`. Был бы @Published — публикации без подписчиков
     /// и ложное обещание реактивности.
@@ -143,6 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupHotkeyHandlers()
         setupASRHandlers()
         setupRecorderHandlers()
+        setupOverlay()
         setupSubscriptions()
 
         hotkey.startMonitoring()
@@ -237,6 +243,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // на транзиции записи true→false (см. `setupSubscriptions`).
     }
 
+    private func setupOverlay() {
+        overlay = DictationOverlayController(
+            recorder: recorder,
+            onTogglePause: { [weak self] in self?.recorder.togglePause() },
+            onStop: { [weak self] in self?.stopRecordingFlow() }
+        )
+    }
+
     private func setupSubscriptions() {
         // Pairwise (previous, current) — нам важна именно ТРАНЗИЦИЯ true→false,
         // чтобы дёрнуть transcribe ровно один раз (включая случай VAD-auto-stop).
@@ -248,19 +262,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.updateIcon()
                 self.rebuildMenu()
 
-                // Транзиция «писали → перестали писать»: запускаем batch
-                // transcribe на накопленном аудио.
+                // Транзиция «писали → перестали писать»: прячем overlay,
+                // запускаем batch transcribe на накопленном аудио.
                 if prev && !curr {
+                    self.overlay?.hide()
                     self.startTranscribe()
                 }
-                // Транзиция «не писали → начали писать»: прерываем в-полёте
-                // transcribe (если есть) — мы стартовали новую запись, прошлый
-                // результат уже не нужен. Стираем точки прогресс-анимации
-                // если они ещё в поле (синхронно, до начала записи).
+                // Транзиция «не писали → начали писать»: показываем overlay,
+                // прерываем в-полёте transcribe (если есть) — мы стартовали
+                // новую запись, прошлый результат уже не нужен. Стираем точки
+                // прогресс-анимации если они ещё в поле.
                 if !prev && curr {
                     self.transcribeTask?.cancel()
                     self.transcribeTask = nil
                     self.stopProgressAnimation(clear: true)
+                    self.overlay?.show()
                 }
             }
             .store(in: &cancellables)

@@ -33,6 +33,12 @@ final class AudioRecorder: ObservableObject {
     /// именно по этому флагу, а не по `isRecording`, чтобы юзер начинал
     /// говорить когда запись реально идёт (иначе первые слова теряются).
     @Published var isCapturing = false
+    /// Поставлена ли запись на паузу. Engine продолжает крутиться (микрофон
+    /// активен), но сэмплы НЕ копятся и VAD auto-stop не считается.
+    @Published var isPaused = false
+    /// Текущий уровень громкости (нормализованный 0…1) для waveform-визуализации
+    /// в overlay. Обновляется на каждый аудио-буфер (~раз в 85мс) с main.
+    @Published var audioLevel: Float = 0
     @Published var lastError: String?
 
     private let engine = AVAudioEngine()
@@ -58,6 +64,16 @@ final class AudioRecorder: ObservableObject {
     /// первый буфер ещё не пришёл (чтобы залогировать разовую задержку).
     private var startRequestedAt: Date?
     private var awaitingFirstBuffer: Bool = false
+
+    /// Thread-safe зеркало `isPaused` для audio-потока (читается в `handle`).
+    /// `@Published isPaused` мутируется с main — отдельный lock-protected флаг
+    /// избегает data race при чтении с аудио-callback'а.
+    private var pausedForAudio: Bool = false
+    private let pauseLock = NSLock()
+
+    /// Усиление для нормализации RMS → audioLevel [0…1]. Речь даёт RMS ~0.03…0.2,
+    /// gain 7 растягивает это в видимый диапазон полосок waveform.
+    private static let levelGain: Float = 7.0
 
     init(silenceTimeoutProvider: @escaping () -> TimeInterval = { 7.0 }) {
         self.silenceTimeoutProvider = silenceTimeoutProvider
@@ -85,6 +101,8 @@ final class AudioRecorder: ObservableObject {
         lastError = nil
         isRecording = true   // оптимистично — UI не ждёт инициализации
         isCapturing = false  // станет true когда придёт первый реальный буфер
+        isPaused = false
+        audioLevel = 0
         startRequestedAt = Date()
         awaitingFirstBuffer = true
 
@@ -101,6 +119,8 @@ final class AudioRecorder: ObservableObject {
         guard isRecording else { return }
         isRecording = false  // UI сразу реагирует
         isCapturing = false
+        isPaused = false
+        audioLevel = 0
 
         workQueue.async { [weak self] in
             self?.stopInternal()
@@ -109,6 +129,28 @@ final class AudioRecorder: ObservableObject {
 
     func toggle() {
         if isRecording { stop() } else { start() }
+    }
+
+    /// Пауза записи: сэмплы перестают копиться, VAD auto-stop не считается.
+    /// Engine продолжает крутиться — resume() мгновенный, без раскрутки железа.
+    func pause() {
+        guard isRecording, !isPaused else { return }
+        isPaused = true
+        audioLevel = 0
+        pauseLock.lock(); pausedForAudio = true; pauseLock.unlock()
+    }
+
+    /// Продолжить запись после паузы. Сбрасываем silence-таймер чтобы не
+    /// сработал немедленный auto-stop из накопленной на паузе «тишины».
+    func resume() {
+        guard isRecording, isPaused else { return }
+        isPaused = false
+        pauseLock.lock(); pausedForAudio = false; pauseLock.unlock()
+        silenceTracker.reset()
+    }
+
+    func togglePause() {
+        if isPaused { resume() } else { pause() }
     }
 
     // MARK: - Internals (workQueue / audio thread)
@@ -189,6 +231,11 @@ final class AudioRecorder: ObservableObject {
             }
         }
 
+        // На паузе: не конвертируем, не копим, не считаем VAD. Engine крутится
+        // (микрофон активен), resume() мгновенный.
+        pauseLock.lock(); let paused = pausedForAudio; pauseLock.unlock()
+        if paused { return }
+
         let state = ConversionState(input: buffer)
         var error: NSError?
         converter.convert(to: outBuffer, error: &error) { _, statusPtr in
@@ -213,6 +260,13 @@ final class AudioRecorder: ObservableObject {
             sumSquares += s * s
         }
         let rms = sqrt(sumSquares / Float(frameLength))
+
+        // Публикуем уровень для waveform-визуализации в overlay.
+        let level = min(1.0, rms * Self.levelGain)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isRecording, !self.isPaused else { return }
+            self.audioLevel = level
+        }
 
         samplesLock.lock()
         capturedSamples.append(contentsOf: newSamples)
