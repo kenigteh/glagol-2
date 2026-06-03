@@ -67,6 +67,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// защита от инжекции в чужое поле).
     private var transcribeTask: Task<Void, Never>?
 
+    /// Готовность записи для UI (overlay + красная иконка). Запись стартует
+    /// СРАЗУ на хоткей (аудио копится с первой мс), но overlay/анимация
+    /// показываются с фиксированной задержкой `readyDelaySec` — к этому моменту
+    /// железо микрофона гарантированно раскрутилось. Юзер ориентируется на
+    /// появление overlay и начинает говорить когда запись уже идёт стабильно.
+    ///
+    /// Почему фикс-задержка, а не `isCapturing` (первый буфер): после warm-start
+    /// движка (engine.prepare без reset) первый буфер приходит за ~50мс, ДО
+    /// стабилизации звука — `isCapturing` стал срабатывать слишком рано, overlay
+    /// показывался под мёртвый waveform и юзер терял первые слова. Фикс-задержка
+    /// предсказуема и не зависит от тёплости движка.
+    private var recordingReady: Bool = false
+    private var readyTimer: Timer?
+    private static let readyDelaySec: TimeInterval = 0.75
+
     /// Анимация прогресса транскрипции — печатается прямо в строку ввода пока
     /// модель обрабатывает аудио, чтобы юзер видел что процесс идёт.
     /// Цикл `progressFrames` через `injector` (diff сам стирает/печатает).
@@ -278,39 +293,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.rebuildMenu()
 
                 // Транзиция «писали → перестали писать»: прячем overlay,
-                // запускаем batch transcribe на накопленном аудио.
+                // отменяем ready-таймер, запускаем batch transcribe.
                 if prev && !curr {
+                    self.readyTimer?.invalidate()
+                    self.readyTimer = nil
+                    self.recordingReady = false
                     self.overlay?.hide()
+                    self.updateIcon()
                     self.startTranscribe()
                 }
                 // Транзиция «не писали → начали писать»: прерываем в-полёте
-                // transcribe (если есть) — мы стартовали новую запись, прошлый
-                // результат уже не нужен. Стираем spinner если ещё в поле.
-                // Overlay НЕ показываем здесь — он появляется по isCapturing
-                // (когда железо реально готово), см. ниже.
+                // transcribe, стираем spinner, и запускаем ready-таймер.
+                // Запись УЖЕ идёт (recorder.start вызван в beginRecordingSession),
+                // аудио копится с первой мс. Overlay/анимация/красная иконка
+                // появятся через `readyDelaySec` — к этому моменту железо готово.
                 if !prev && curr {
                     self.transcribeTask?.cancel()
                     self.transcribeTask = nil
                     self.stopProgressAnimation(clear: true)
-                }
-            }
-            .store(in: &cancellables)
 
-        // isCapturing меняется когда железо реально начало писать (первый
-        // буфер, ~250мс после старта). По нему:
-        //   - иконка «готовлюсь» (жёлтая) → «слушаю» (красная анимированная)
-        //   - ПОКАЗЫВАЕМ overlay (раньше показывали по isRecording — мгновенно,
-        //     до готовности железа; юзер начинал говорить под пустой overlay и
-        //     терял первые слова + waveform был мёртвый первую секунду).
-        // Теперь overlay появляется = запись реально идёт = waveform сразу живой,
-        // и это честный сигнал «говори».
-        recorder.$isCapturing
-            .receive(on: RunLoop.main)
-            .sink { [weak self] capturing in
-                guard let self else { return }
-                self.updateIcon()
-                if capturing {
-                    self.overlay?.show()
+                    self.recordingReady = false
+                    self.readyTimer?.invalidate()
+                    self.readyTimer = Timer.scheduledTimer(
+                        withTimeInterval: Self.readyDelaySec, repeats: false
+                    ) { [weak self] _ in
+                        MainActor.assumeIsolated {
+                            guard let self, self.recorder.isRecording else { return }
+                            self.recordingReady = true
+                            self.updateIcon()
+                            self.overlay?.show()
+                        }
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -657,9 +670,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateIcon() {
         guard let iconView, let button = statusItem.button else { return }
 
-        if recorder.isCapturing {
-            // Железо готово, запись РЕАЛЬНО идёт — красная анимированная.
-            // Это сигнал «говори». Юзер ориентируется именно на него.
+        if recordingReady {
+            // Готовность по фикс-таймеру (0.5с) — запись идёт стабильно,
+            // красная анимированная. Сигнал «говори». Юзер ориентируется на него.
             let image = NSImage(
                 systemSymbolName: "waveform",
                 accessibilityDescription: "Идёт запись"
@@ -673,7 +686,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             button.setAccessibilityLabel("Glagol, идёт запись")
         } else if recorder.isRecording {
-            // Хоткей нажат, но железо ещё раскручивается (~250мс).
+            // Хоткей нажат, идёт раскрутка железа (~0.5с до readyTimer).
             // Жёлтая статичная — «подожди, готовлюсь». НЕ говори ещё.
             iconView.removeAllSymbolEffects()
             let image = NSImage(
