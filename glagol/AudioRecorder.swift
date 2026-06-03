@@ -1,6 +1,9 @@
 import Foundation
 @preconcurrency import AVFoundation
 import Combine
+import OSLog
+
+private let recLog = Logger(subsystem: "com.sakovskii.glagol", category: "recorder")
 
 /// VAD-порог RMS для определения тишины (нормализованный диапазон [-1, 1]).
 /// Используется для авто-стопа по продолжительной тишине.
@@ -25,6 +28,11 @@ enum VADConstants {
 ///   с main после stop.
 final class AudioRecorder: ObservableObject {
     @Published var isRecording = false
+    /// `true` когда железо РЕАЛЬНО выдало первый аудио-буфер (через ~200-275мс
+    /// после `start()` — раскрутка микрофона). UI показывает иконку «слушаю»
+    /// именно по этому флагу, а не по `isRecording`, чтобы юзер начинал
+    /// говорить когда запись реально идёт (иначе первые слова теряются).
+    @Published var isCapturing = false
     @Published var lastError: String?
 
     private let engine = AVAudioEngine()
@@ -46,8 +54,17 @@ final class AudioRecorder: ObservableObject {
     /// 5 минут × 16000 Hz × 4 байта = 19 МБ — приемлемо.
     private static let maxRecordingSec: Double = 300.0
 
+    /// Инструментация задержки старта: момент вызова `start()` и флаг что
+    /// первый буфер ещё не пришёл (чтобы залогировать разовую задержку).
+    private var startRequestedAt: Date?
+    private var awaitingFirstBuffer: Bool = false
+
     init(silenceTimeoutProvider: @escaping () -> TimeInterval = { 7.0 }) {
         self.silenceTimeoutProvider = silenceTimeoutProvider
+        // ВНИМАНИЕ: engine.prepare() здесь НЕЛЬЗЯ — на пустом графе (inputNode
+        // ещё не материализован, нет tap'а) AVAudioEngine крашится с
+        // "inputNode != nullptr || outputNode != nullptr". prepare() вызываем
+        // в startInternal после installTap, когда граф настроен.
     }
 
     /// Сэмплы текущей записи (после `stop()`). Возвращает копию — caller
@@ -67,6 +84,9 @@ final class AudioRecorder: ObservableObject {
         guard !isRecording else { return }
         lastError = nil
         isRecording = true   // оптимистично — UI не ждёт инициализации
+        isCapturing = false  // станет true когда придёт первый реальный буфер
+        startRequestedAt = Date()
+        awaitingFirstBuffer = true
 
         samplesLock.lock()
         capturedSamples.removeAll(keepingCapacity: true)
@@ -80,6 +100,7 @@ final class AudioRecorder: ObservableObject {
     func stop() {
         guard isRecording else { return }
         isRecording = false  // UI сразу реагирует
+        isCapturing = false
 
         workQueue.async { [weak self] in
             self?.stopInternal()
@@ -118,8 +139,14 @@ final class AudioRecorder: ObservableObject {
             self?.handle(buffer: buffer, converter: converter, targetFormat: targetFormat)
         }
 
+        // prepare() с уже установленным tap'ом — граф валиден, preallocate
+        // ресурсы перед start() для ускорения cold-start аудио-железа.
+        engine.prepare()
+
         do {
+            let t0 = Date()
             try engine.start()
+            recLog.notice("[Rec] engine.start() returned in \(Date().timeIntervalSince(t0) * 1000, privacy: .public)ms")
         } catch {
             input.removeTap(onBus: 0)
             failOnMain("Не удалось запустить движок: \(error.localizedDescription)")
@@ -129,10 +156,12 @@ final class AudioRecorder: ObservableObject {
     private func stopInternal() {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        // reset() сбрасывает внутреннее состояние audio-узлов и освобождает
-        // буферы между сессиями. Без него на быстром start→stop→start
-        // аудиоузлы накапливают state.
-        engine.reset()
+        // НЕ вызываем engine.reset(): он сбрасывает граф в холодное состояние,
+        // из-за чего следующий engine.start() снова раскручивает аудио-железо
+        // с нуля (~сотни мс → потеря первых слов). Просто stop без reset
+        // оставляет граф теплее. prepare() здесь НЕ вызываем — после removeTap
+        // граф может быть невалиден (краш как в init); prepare идёт в
+        // startInternal с уже установленным tap'ом.
         silenceTracker.reset()
     }
 
@@ -147,6 +176,18 @@ final class AudioRecorder: ObservableObject {
             pcmFormat: targetFormat,
             frameCapacity: capacity
         ) else { return }
+
+        // Первый реальный буфер = железо раскрутилось, запись пошла.
+        // Выставляем isCapturing на main → UI меняет иконку на «слушаю»,
+        // юзер начинает говорить когда запись уже идёт.
+        if awaitingFirstBuffer, let t0 = startRequestedAt {
+            awaitingFirstBuffer = false
+            recLog.notice("[Rec] first audio buffer \(Date().timeIntervalSince(t0) * 1000, privacy: .public)ms after start()")
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isRecording else { return }
+                self.isCapturing = true
+            }
+        }
 
         let state = ConversionState(input: buffer)
         var error: NSError?

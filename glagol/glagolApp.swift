@@ -265,6 +265,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        // isCapturing меняется когда железо реально начало писать (первый
+        // буфер, ~250мс после старта). Обновляем иконку — переход «готовлюсь»
+        // (жёлтая) → «слушаю» (красная анимированная). Юзер начинает говорить
+        // когда видит красную, и первые слова не теряются.
+        recorder.$isCapturing
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateIcon() }
+            .store(in: &cancellables)
+
         recorder.$lastError
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.rebuildMenu() }
@@ -496,7 +505,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateIcon() {
         guard let iconView, let button = statusItem.button else { return }
 
-        if recorder.isRecording {
+        if recorder.isCapturing {
+            // Железо готово, запись РЕАЛЬНО идёт — красная анимированная.
+            // Это сигнал «говори». Юзер ориентируется именно на него.
             let image = NSImage(
                 systemSymbolName: "waveform",
                 accessibilityDescription: "Идёт запись"
@@ -509,6 +520,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 options: .repeating
             )
             button.setAccessibilityLabel("Glagol, идёт запись")
+        } else if recorder.isRecording {
+            // Хоткей нажат, но железо ещё раскручивается (~250мс).
+            // Жёлтая статичная — «подожди, готовлюсь». НЕ говори ещё.
+            iconView.removeAllSymbolEffects()
+            let image = NSImage(
+                systemSymbolName: "waveform",
+                accessibilityDescription: "Подготовка записи"
+            )
+            image?.isTemplate = false
+            iconView.image = image
+            iconView.contentTintColor = .systemYellow
+            button.setAccessibilityLabel("Glagol, подготовка записи")
         } else {
             iconView.removeAllSymbolEffects()
             let image = NSImage(
