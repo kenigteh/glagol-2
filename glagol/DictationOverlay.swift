@@ -55,13 +55,10 @@ struct DictationOverlayView: View {
     let onTogglePause: () -> Void
     let onStop: () -> Void
 
-    @State private var pulse = false
-
     var body: some View {
         HStack(spacing: 12) {
-            indicator
             WaveformBars(level: recorder.isPaused ? 0 : CGFloat(recorder.audioLevel))
-                .frame(width: 64)
+                .frame(width: 72)
                 .opacity(recorder.isPaused ? 0.4 : 1.0)
             divider
             pauseButton
@@ -78,28 +75,6 @@ struct DictationOverlayView: View {
                 )
                 .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
         )
-    }
-
-    // Левый индикатор: синий пульсирующий кружок (запись) / жёлтый (готовлюсь).
-    private var indicator: some View {
-        let ready = recorder.isCapturing && !recorder.isPaused
-        let color = recorder.isPaused
-            ? Color.orange
-            : (ready ? Color(red: 0.36, green: 0.60, blue: 1.0) : Color.yellow)
-        return Circle()
-            .fill(color)
-            .frame(width: 12, height: 12)
-            .overlay(
-                Circle()
-                    .stroke(color.opacity(0.5), lineWidth: 6)
-                    .scaleEffect(pulse && ready ? 1.8 : 1.0)
-                    .opacity(pulse && ready ? 0 : 0.6)
-            )
-            .onAppear {
-                withAnimation(.easeOut(duration: 1.1).repeatForever(autoreverses: false)) {
-                    pulse = true
-                }
-            }
     }
 
     private var divider: some View {
