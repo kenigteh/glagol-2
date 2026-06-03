@@ -59,10 +59,14 @@ final class TextInjector {
     private func sendBackspaces(count: Int) {
         let src = CGEventSource(stateID: .hidSystemState)
         for _ in 0..<count {
-            CGEvent(keyboardEventSource: src, virtualKey: Self.kVKDelete, keyDown: true)?
-                .post(tap: .cghidEventTap)
-            CGEvent(keyboardEventSource: src, virtualKey: Self.kVKDelete, keyDown: false)?
-                .post(tap: .cghidEventTap)
+            if let down = CGEvent(keyboardEventSource: src, virtualKey: Self.kVKDelete, keyDown: true) {
+                down.flags = []   // см. clearModifiers-коммент в postUnicodeChunk
+                down.post(tap: .cghidEventTap)
+            }
+            if let up = CGEvent(keyboardEventSource: src, virtualKey: Self.kVKDelete, keyDown: false) {
+                up.flags = []
+                up.post(tap: .cghidEventTap)
+            }
         }
     }
 
@@ -108,6 +112,14 @@ final class TextInjector {
         utf16.withUnsafeBufferPointer { buf in
             guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
                   let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { return }
+            // **Сброс модификаторов.** Хоткей остановки — двойной Control. Если
+            // юзер ещё физически держит Control в момент инжекции, система ОР'ит
+            // hardware-modifier state с нашими synthetic-событиями: «⏳» стал бы
+            // Ctrl+⏳ (команда, не печать), Backspace → Ctrl+Backspace (удалить
+            // слово/перенос), буквы → Ctrl-навигация (курсор в начало строки).
+            // Явный `flags = []` говорит системе «эти события без модификаторов».
+            down.flags = []
+            up.flags = []
             down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: buf.baseAddress)
             up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: buf.baseAddress)
             down.post(tap: .cghidEventTap)

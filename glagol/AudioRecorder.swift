@@ -47,6 +47,10 @@ final class AudioRecorder: ObservableObject {
     /// Накопленные сэмплы текущей записи (16 kHz mono Float32). Пишется с
     /// audio thread через `samplesLock`, читается с main через `capturedAudio`.
     private var capturedSamples: [Float] = []
+    /// Сколько сэмплов было «голосом» (RMS выше порога). По нему отличаем
+    /// реальную речь от тишины — на тишине Qwen-LLM галлюцинирует контекст-
+    /// prompt (словарь хотвордов) в выход, поэтому такую запись не транскрибируем.
+    private var voicedSamples: Int = 0
     private let samplesLock = NSLock()
 
     // Silence-detection (auto-stop по тишине).
@@ -71,9 +75,21 @@ final class AudioRecorder: ObservableObject {
     private var pausedForAudio: Bool = false
     private let pauseLock = NSLock()
 
-    /// Усиление для нормализации RMS → audioLevel [0…1]. Речь даёт RMS ~0.03…0.2,
-    /// gain 7 растягивает это в видимый диапазон полосок waveform.
-    private static let levelGain: Float = 7.0
+    /// Параметры нормализации RMS → audioLevel [0…1] для waveform.
+    ///
+    /// Линейная шкала плохо смотрится: у речи большой динамический диапазон
+    /// (громкие атаки согласных vs средние гласные vs тихие хвосты), линейно
+    /// это даёт резкие скачки — пик в потолок, основная масса внизу.
+    ///
+    /// Применяем **компрессию гамма-кривой** `pow(norm, gamma)` с gamma<1:
+    /// поднимает средние уровни → waveform держится «полнее» и выше во время
+    /// речи, динамика сжата → переходы мягче.
+    ///   - `levelFullScale` — RMS, считающийся «полной» громкостью (норм. речь
+    ///     на пиках). Выше → waveform реже бьёт в потолок.
+    ///   - `levelGamma` — кривизна. <1 поднимает середину; 0.6 — заметно, но
+    ///     не плоско.
+    private static let levelFullScale: Float = 0.18
+    private static let levelGamma: Float = 0.6
 
     init(silenceTimeoutProvider: @escaping () -> TimeInterval = { 7.0 }) {
         self.silenceTimeoutProvider = silenceTimeoutProvider
@@ -88,6 +104,14 @@ final class AudioRecorder: ObservableObject {
     var capturedAudio: [Float] {
         samplesLock.lock(); defer { samplesLock.unlock() }
         return capturedSamples
+    }
+
+    /// Длительность «голоса» (RMS выше порога) в секундах. Используется для
+    /// VAD-gate: если речи почти нет — транскрипцию не запускаем (защита от
+    /// утечки контекст-prompt'а на тишине).
+    var voicedDurationSec: Double {
+        samplesLock.lock(); defer { samplesLock.unlock() }
+        return Double(voicedSamples) / 16_000.0
     }
 
     /// Длительность текущей записи в секундах. Удобно для UI.
@@ -108,6 +132,7 @@ final class AudioRecorder: ObservableObject {
 
         samplesLock.lock()
         capturedSamples.removeAll(keepingCapacity: true)
+        voicedSamples = 0
         samplesLock.unlock()
 
         workQueue.async { [weak self] in
@@ -262,14 +287,18 @@ final class AudioRecorder: ObservableObject {
         let rms = sqrt(sumSquares / Float(frameLength))
 
         // Публикуем уровень для waveform-визуализации в overlay.
-        let level = min(1.0, rms * Self.levelGain)
+        // Нормализация + гамма-компрессия (см. levelFullScale/levelGamma).
+        let norm = min(1.0, rms / Self.levelFullScale)
+        let level = pow(norm, Self.levelGamma)
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isRecording, !self.isPaused else { return }
             self.audioLevel = level
         }
 
+        let isVoiced = rms >= VADConstants.rmsThreshold
         samplesLock.lock()
         capturedSamples.append(contentsOf: newSamples)
+        if isVoiced { voicedSamples += frameLength }
         let totalCount = capturedSamples.count
         samplesLock.unlock()
 

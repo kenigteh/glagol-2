@@ -71,10 +71,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// модель обрабатывает аудио, чтобы юзер видел что процесс идёт.
     /// Цикл `progressFrames` через `injector` (diff сам стирает/печатает).
     /// Показывается ТОЛЬКО на время transcribe, не во время записи.
+    ///
+    /// Песочные часы emoji (⏳⌛) — «переворачиваются» раз в секунду.
+    /// История: Braille (⠋⠙⠹…) показывал tofu-прямоугольник в терминале;
+    /// быстрая смена кадров (0.1с) вдобавок мерцала из-за зазора между
+    /// backspace старого символа и печатью нового (два CGEvent, приложение
+    /// обрабатывает не атомарно). Решение: всего 2 кадра + смена раз в секунду —
+    /// зазор delete/insert практически незаметен. Песочные часы интуитивно
+    /// читаются как «идёт обработка, подожди».
     private var progressTimer: Timer?
     private var progressPhase: Int = 0
-    private static let progressFrames = [".", "..", "...", ""]
-    private static let progressTickSec: TimeInterval = 0.35
+    private static let progressFrames = ["⏳", "⌛"]
+    private static let progressTickSec: TimeInterval = 1.0
+
+    /// VAD-gate против утечки контекст-prompt'а на тишине. Если голоса меньше
+    /// `minVoicedSec` ИЛИ его доля от записи меньше `minVoicedRatio` — считаем
+    /// что юзер молчал, transcribe не запускаем. Пороги мягкие: реальная (даже
+    /// тихая/короткая) речь проходит, чистая тишина — отсекается.
+    private static let minVoicedSec: Double = 0.3
+    private static let minVoicedRatio: Double = 0.1
 
     // IUO: набивается в applicationDidFinishLaunching, до этого NSStatusBar ещё нет.
     private var statusItem: NSStatusItem!
@@ -268,26 +283,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.overlay?.hide()
                     self.startTranscribe()
                 }
-                // Транзиция «не писали → начали писать»: показываем overlay,
-                // прерываем в-полёте transcribe (если есть) — мы стартовали
-                // новую запись, прошлый результат уже не нужен. Стираем точки
-                // прогресс-анимации если они ещё в поле.
+                // Транзиция «не писали → начали писать»: прерываем в-полёте
+                // transcribe (если есть) — мы стартовали новую запись, прошлый
+                // результат уже не нужен. Стираем spinner если ещё в поле.
+                // Overlay НЕ показываем здесь — он появляется по isCapturing
+                // (когда железо реально готово), см. ниже.
                 if !prev && curr {
                     self.transcribeTask?.cancel()
                     self.transcribeTask = nil
                     self.stopProgressAnimation(clear: true)
-                    self.overlay?.show()
                 }
             }
             .store(in: &cancellables)
 
         // isCapturing меняется когда железо реально начало писать (первый
-        // буфер, ~250мс после старта). Обновляем иконку — переход «готовлюсь»
-        // (жёлтая) → «слушаю» (красная анимированная). Юзер начинает говорить
-        // когда видит красную, и первые слова не теряются.
+        // буфер, ~250мс после старта). По нему:
+        //   - иконка «готовлюсь» (жёлтая) → «слушаю» (красная анимированная)
+        //   - ПОКАЗЫВАЕМ overlay (раньше показывали по isRecording — мгновенно,
+        //     до готовности железа; юзер начинал говорить под пустой overlay и
+        //     терял первые слова + waveform был мёртвый первую секунду).
+        // Теперь overlay появляется = запись реально идёт = waveform сразу живой,
+        // и это честный сигнал «говори».
         recorder.$isCapturing
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateIcon() }
+            .sink { [weak self] capturing in
+                guard let self else { return }
+                self.updateIcon()
+                if capturing {
+                    self.overlay?.show()
+                }
+            }
             .store(in: &cancellables)
 
         recorder.$lastError
@@ -409,7 +434,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let durationSec = Double(audio.count) / 16_000.0
-        qwenAppLog.notice("startTranscribe: \(audio.count) samples (\(durationSec)s)")
+
+        // VAD-gate: если в записи почти нет голоса — это тишина. На тишине
+        // Qwen-LLM генерирует наиболее «доступный» текст из контекста = наш
+        // context-prompt (словарь хотвордов) утекает в выход. Не транскрибируем.
+        let voicedSec = recorder.voicedDurationSec
+        let voicedRatio = durationSec > 0 ? voicedSec / durationSec : 0
+        if voicedSec < Self.minVoicedSec || voicedRatio < Self.minVoicedRatio {
+            qwenAppLog.notice("startTranscribe: too little voice (voiced=\(voicedSec)s ratio=\(voicedRatio)) — skipping (silence)")
+            return
+        }
+
+        qwenAppLog.notice("startTranscribe: \(audio.count) samples (\(durationSec)s), voiced=\(voicedSec)s")
         asrStatus = "Транскрибирую…"
         rebuildMenu()
 
@@ -444,11 +480,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.stopProgressAnimation(clear: true)
                     return
                 }
+                // Output-фильтр против утечки промпта (defense-in-depth поверх
+                // VAD-gate). Двухступенчато:
+                //   1. Вырезаем непрерывные цепочки словарных терминов через
+                //      запятую («…, Anthropic, ASR, CI/CD, Claude, …») — это
+                //      формат утечки, в т.ч. когда она приклеилась хвостом к
+                //      реальному тексту. Реальную речь не трогаем.
+                //   2. Если после вырезки текст всё ещё на большую долю из
+                //      терминов (утечка без запятых) — отбрасываем целиком.
+                let cleaned = self.stripPromptLeakRuns(text)
+                if cleaned.isEmpty || self.looksLikePromptLeak(cleaned) {
+                    qwenAppLog.notice("transcribe output looks like prompt leak — discarding. raw=\"\(text)\" cleaned=\"\(cleaned)\"")
+                    self.stopProgressAnimation(clear: true)
+                    return
+                }
+                if cleaned != text {
+                    qwenAppLog.notice("stripped prompt-leak run. raw=\"\(text)\" → \"\(cleaned)\"")
+                }
                 // Останавливаем анимацию БЕЗ стирания: `update(to: text)` сам
                 // сделает diff от текущих точек (backspace точек + печать текста)
                 // одной операцией — без мигания пустотой между ними.
                 self.stopProgressAnimation(clear: false)
-                self.injector.update(to: text)
+                self.injector.update(to: cleaned)
                 self.injector.reset()
             } catch {
                 self.stopProgressAnimation(clear: true)
@@ -458,6 +511,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    /// Эвристика: похож ли результат transcribe на утечку context-prompt'а
+    /// (словарь хотвордов), а не на реальную речь.
+    ///
+    /// **Сигнал:** не просто «содержит термины» (реальная речь их тоже содержит —
+    /// юзер для того их и добавил), а **высокая ДОЛЯ** слов результата = словарные
+    /// термины. Утечка выглядит как «Anthropic, ASR, CI/CD, Claude, …» — почти
+    /// 100% слов из словаря, подряд. Реальная фраза с парой терминов («добавил
+    /// Claude через FastAPI») имеет низкую долю и не отсекается.
+    ///
+    /// Срабатывает только если: словарь ≥ 5 слов (иначе не на чем судить),
+    /// совпало ≥ 5 слов И их доля ≥ 60%.
+    private func looksLikePromptLeak(_ text: String) -> Bool {
+        // Множество слов словаря (термины могут быть многословными — «Docker
+        // Compose», «pull request» — разбиваем на отдельные слова).
+        let dictWords = Set(hotwords.words.flatMap { Self.normalizeWords($0) })
+        guard dictWords.count >= 5 else { return false }
+
+        let resultWords = Self.normalizeWords(text)
+        guard !resultWords.isEmpty else { return false }
+
+        let matched = resultWords.filter { dictWords.contains($0) }.count
+        let ratio = Double(matched) / Double(resultWords.count)
+        return matched >= 5 && ratio >= 0.6
+    }
+
+    /// Нормализация строки в массив слов: lowercase, разбивка по пробелам,
+    /// срезание окраинной пунктуации. «CI/CD» остаётся одним токеном (внутренний
+    /// слэш не режем — он есть и в словарном термине).
+    private static func normalizeWords(_ s: String) -> [String] {
+        s.lowercased()
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?()[]{}\"'«»—-")) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Минимальная длина непрерывной цепочки терминов-через-запятую, считающаяся
+    /// утечкой. 6 — реальный список из 6+ словарных терминов подряд через запятую
+    /// крайне редок, а утечка обычно длинная (весь словарь, 20+ терминов).
+    private static let minPromptLeakRun: Int = 6
+
+    /// Вырезает из текста непрерывные цепочки словарных терминов через запятую
+    /// (формат утечки context-prompt'а). Разбивает по запятым, помечает
+    /// сегменты, целиком состоящие из словарных слов, находит непрерывные
+    /// run'ы длиной ≥ `minPromptLeakRun` и удаляет их. Остальной текст склеивает
+    /// обратно и чистит осиротевшую пунктуацию.
+    private func stripPromptLeakRuns(_ text: String) -> String {
+        let dictWords = Set(hotwords.words.flatMap { Self.normalizeWords($0) })
+        guard dictWords.count >= Self.minPromptLeakRun else { return text }
+
+        let segments = text.components(separatedBy: ",")
+        guard segments.count >= Self.minPromptLeakRun else { return text }
+
+        // Сегмент «термин», если непуст и ВСЕ его слова — словарные.
+        let isTerm: [Bool] = segments.map { seg in
+            let w = Self.normalizeWords(seg)
+            return !w.isEmpty && w.allSatisfy { dictWords.contains($0) }
+        }
+
+        // Помечаем на удаление сегменты внутри run'ов длиной ≥ порога.
+        var keep = [Bool](repeating: true, count: segments.count)
+        var i = 0
+        while i < segments.count {
+            if isTerm[i] {
+                var j = i
+                while j < segments.count && isTerm[j] { j += 1 }
+                if j - i >= Self.minPromptLeakRun {
+                    for k in i..<j { keep[k] = false }
+                }
+                i = j
+            } else {
+                i += 1
+            }
+        }
+
+        guard keep.contains(false) else { return text }  // ничего не вырезали
+
+        let kept = zip(segments, keep).filter { $0.1 }.map { $0.0 }
+        var result = kept.joined(separator: ",")
+        // Чистим осиротевшую пунктуацию/пробелы по краям и схлопываем дыры.
+        result = result.trimmingCharacters(in: CharacterSet(charactersIn: " ,.;:—-"))
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Progress animation (точки в строке ввода во время transcribe)

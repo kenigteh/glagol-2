@@ -30,11 +30,16 @@
 
 - **Полностью локально** — модель работает на Apple Silicon GPU через MLX. Никаких внешних API.
 - **Кастомный хоткей** — двойной модификатор (⌃⌃ по умолчанию) или произвольное сочетание
+- **Floating overlay** — плавающая капсула во время диктовки (адаптация Aqua Voice): живой waveform реагирует на голос + кнопки пауза/продолжить и стоп
+- **Индикатор готовности** — menubar-иконка: жёлтая «готовлюсь» (железо раскручивается ~250мс) → красная «слушаю» (запись реально идёт). Начинаешь говорить по красной — первые слова не теряются
+- **Анимация обработки** — пока модель распознаёт, в поле ввода крутятся песочные часы ⏳⌛ (заменяются на текст по готовности)
 - **Auto-stop по тишине** — записи завершаются сами через настраиваемую паузу (7-30 секунд)
+- **Пауза/продолжение** — на паузе микрофон не пишет, но движок не глушится (resume мгновенный)
 - **Hotwords / context-prompt** — пользовательский словарь редких терминов биасит модель к их сохранению (`Cursor`, `Kubernetes`, и др.)
+- **Защита от утечки промпта** — на тишине LLM-ASR склонны галлюцинировать context-prompt в выход; ловится тремя барьерами (VAD-gate + вырезание цепочек терминов + полный отброс)
 - **Multilingual code-switching** — русский с английскими IT-терминами в одной фразе ловится корректно
 - **Menubar-only** — никакой Dock-иконки, всегда под рукой
-- **Per-grapheme injection** — текст печатается через CGEvent с правильным chunking'ом (работает в терминалах, IDE, чатах, везде)
+- **Надёжная инжекция** — текст печатается через CGEvent с chunking'ом по 8 символов (работает в терминалах, IDE, чатах) и сбросом модификаторов (не ломается при остановке двойным Ctrl)
 
 ## Требования
 
@@ -70,14 +75,15 @@ MLX компилирует Metal-шейдеры через эту тулчейн
 
 ```
 Микрофон → AudioRecorder (AVAudioEngine, 16kHz mono Float32)
-              ↓
-          (накапливает в [Float] до stop'а)
-              ↓
+              ↓  накапливает в [Float] до stop'а; RMS → audioLevel (waveform) + voiced-счётчик (VAD-gate)
+              │
+              ├─→ первый буфер → isCapturing → overlay показывается, иконка краснеет
+              │
    on stop / VAD-auto-stop:
-              ↓
+              ↓  VAD-gate: достаточно голоса?
           QwenASR.transcribe(audio: [Float]) async → String
-              ↓
-          TextInjector (CGEvent → активное поле, chunks of 8 chars)
+              ↓  prompt-leak фильтр (вырезание цепочек терминов / отброс)
+          TextInjector (CGEvent → активное поле, chunks of 8 chars, flags=[])
 ```
 
 ### Файлы
@@ -87,11 +93,12 @@ MLX компилирует Metal-шейдеры через эту тулчейн
 | `BatchASR.swift` | Port (Protocol) для batch ASR-движка — `transcribe(audio:) → String` |
 | `QwenASR.swift` | Адаптер Qwen3-ASR через speech-swift / MLX |
 | `QwenModelChoice.swift` | UI-выбор размера модели (0.6B / 1.7B) |
-| `AudioRecorder.swift` | AVAudioEngine pipeline, накопление сэмплов, VAD auto-stop |
+| `AudioRecorder.swift` | AVAudioEngine pipeline, накопление сэмплов, audioLevel, VAD auto-stop, pause/resume |
+| `DictationOverlay.swift` | Плавающая капсула (SwiftUI waveform + кнопки) в non-activating NSPanel |
 | `HotkeyManager.swift` | CGEventTap, кастомный hotkey-recording panel |
-| `TextInjector.swift` | CGEvent injection chunks of 8 chars (работает в терминалах) |
+| `TextInjector.swift` | CGEvent injection chunks of 8 chars + сброс модификаторов |
 | `HotwordsStore.swift` | UserDefaults + текстовый файл со словарём пользователя |
-| `glagolApp.swift` | AppDelegate, NSStatusItem, panels, wiring |
+| `glagolApp.swift` | AppDelegate, NSStatusItem, overlay/icon lifecycle, prompt-leak фильтр, wiring |
 
 ## Бенчмарк
 
