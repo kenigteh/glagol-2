@@ -9,10 +9,15 @@
 /* Begin PBXBuildFile section */
 		1750DA342FB391B400312FB3 /* Qwen3ASR in Frameworks */ = {isa = PBXBuildFile; productRef = 1750DA332FB391B400312FB3 /* Qwen3ASR */; };
 		17BBBB002FB400000000000A /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = 17BBBB012FB400000000000B /* MLX */; };
+		17CCCC032FB400000000001C /* sherpa-onnx.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 17CCCC012FB400000000001A /* sherpa-onnx.xcframework */; };
+		17CCCC042FB400000000001D /* libonnxruntime.1.24.4.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 17CCCC022FB400000000001B /* libonnxruntime.1.24.4.dylib */; };
+		17CCCC052FB400000000001E /* libonnxruntime.1.24.4.dylib in Embed Libraries */ = {isa = PBXBuildFile; fileRef = 17CCCC022FB400000000001B /* libonnxruntime.1.24.4.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		1718B3892FB0CB0B00E2CA14 /* glagol.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = glagol.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		17CCCC012FB400000000001A /* sherpa-onnx.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = "sherpa-onnx.xcframework"; path = "Frameworks/sherpa-onnx.xcframework"; sourceTree = "<group>"; };
+		17CCCC022FB400000000001B /* libonnxruntime.1.24.4.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = "libonnxruntime.1.24.4.dylib"; path = "Frameworks/libonnxruntime.1.24.4.dylib"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -30,18 +35,44 @@
 			files = (
 				1750DA342FB391B400312FB3 /* Qwen3ASR in Frameworks */,
 				17BBBB002FB400000000000A /* MLX in Frameworks */,
+				17CCCC032FB400000000001C /* sherpa-onnx.xcframework in Frameworks */,
+				17CCCC042FB400000000001D /* libonnxruntime.1.24.4.dylib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		17CCCC062FB400000000001F /* Embed Libraries */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				17CCCC052FB400000000001E /* libonnxruntime.1.24.4.dylib in Embed Libraries */,
+			);
+			name = "Embed Libraries";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXGroup section */
 		1718B3802FB0CB0B00E2CA14 = {
 			isa = PBXGroup;
 			children = (
 				1718B38B2FB0CB0B00E2CA14 /* glagol */,
+				17CCCC072FB400000000002A /* Frameworks */,
 				1718B38A2FB0CB0B00E2CA14 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		17CCCC072FB400000000002A /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				17CCCC012FB400000000001A /* sherpa-onnx.xcframework */,
+				17CCCC022FB400000000001B /* libonnxruntime.1.24.4.dylib */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		1718B38A2FB0CB0B00E2CA14 /* Products */ = {
@@ -62,6 +93,7 @@
 				1718B3852FB0CB0B00E2CA14 /* Sources */,
 				1718B3862FB0CB0B00E2CA14 /* Frameworks */,
 				1718B3872FB0CB0B00E2CA14 /* Resources */,
+				17CCCC062FB400000000001F /* Embed Libraries */,
 			);
 			buildRules = (
 			);
@@ -271,6 +303,14 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Glagol uses your microphone to convert your voice into text.";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Frameworks",
+				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -284,6 +324,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "glagol/SherpaOnnx-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -304,6 +345,14 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Glagol uses your microphone to convert your voice into text.";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Frameworks",
+				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -317,6 +366,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "glagol/SherpaOnnx-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 			};

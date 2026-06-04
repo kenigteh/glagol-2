@@ -44,8 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// в исходном написании. Файл живёт в Application Support.
     let hotwords: HotwordsStore
     /// Активный движок распознавания. Тип — порт `BatchASR`, конкретная
-    /// реализация подменяется в `makeBatchASR()`. Сейчас — `QwenASR`.
-    let asr: BatchASR
+    /// реализация (`QwenASR` / `GigaAMSherpaASR`) подменяется через
+    /// `switchEngine(to:)` при смене модели в меню. `var` — движок меняется.
+    private(set) var asr: BatchASR
     let injector = TextInjector()
 
     /// Плавающий overlay диктовки (waveform + кнопки пауза/стоп). Показывается
@@ -59,6 +60,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var asrReady: Bool = false
     var asrError: String?
     var asrStatus: String?
+    /// Открыто ли сейчас menubar-меню. Пока меню открыто, переприсвоение
+    /// `statusItem.menu` невидимо — AppKit показывает старый `NSMenu` до закрытия.
+    /// Поэтому при открытом меню обновляем живые NSMenuItem in-place
+    /// (см. `applyMenuState` / `updateLiveASRMenuItems`).
+    private var menuIsOpen: Bool = false
+    /// Weak-ref на пункт «Начать запись» — чтобы менять `isEnabled` in-place в
+    /// открытом меню (иначе кнопка остаётся серой пока меню не переоткроют).
+    private weak var startMenuItem: NSMenuItem?
     /// Статус mic-permission. `nil` пока не проверили; `true/false` после первой попытки.
     var micPermissionDenied: Bool = false
 
@@ -159,16 +168,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// появится protection против prompt-leak (например, явный suppression
     /// token в decoder pass).
     ///
-    /// closure вызывается с main thread каждый раз перед transcribe.
+    /// URL-база, откуда GigaAM-адаптер качает модель — НАПРЯМУЮ с официального
+    /// HuggingFace (csukuangfj). Эмпирически проверено: sherpa-onnx v1.13.x
+    /// грузит эту модель БЕЗ патча metadata (старая проблema, под которую
+    /// писался patch_model_metadata.py в v1, в новой версии sherpa решена).
+    /// Так что свой хостинг не нужен — качаем оригинал.
+    /// Файлы: encoder.int8.onnx, decoder.onnx, joiner.onnx, tokens.txt.
+    private static let gigaamModelBase =
+        "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16/resolve/main"
+
+    /// Создаёт движок для текущего выбора в `store.selectedModel`.
     private static func makeBatchASR(store: HotwordsStore) -> BatchASR {
-        return QwenASR(
-            modelId: store.selectedModelId,
-            contextProvider: { [weak store] in
-                let style = "Используй короткие предложения с точками."
-                guard let words = store?.words, !words.isEmpty else { return style }
-                return style + " Часто встречающиеся слова: " + words.joined(separator: ", ")
-            }
-        )
+        let choice = ModelChoice(rawValue: store.selectedModel) ?? .default
+        return makeEngine(choice: choice, store: store)
+    }
+
+    /// Фабрика движка по `ModelChoice`. Qwen — context-prompt из словаря;
+    /// GigaAM — sherpa-onnx, словарь пока не использует (другой механизм).
+    private static func makeEngine(choice: ModelChoice, store: HotwordsStore) -> BatchASR {
+        switch choice.engine {
+        case .qwen:
+            let modelId = choice.qwenModelId ?? ModelChoice.qwenLarge.qwenModelId!
+            return QwenASR(
+                modelId: modelId,
+                contextProvider: { [weak store] in
+                    let style = "Используй короткие предложения с точками."
+                    guard let words = store?.words, !words.isEmpty else { return style }
+                    return style + " Часто встречающиеся слова: " + words.joined(separator: ", ")
+                }
+            )
+        case .gigaam:
+            return GigaAMSherpaASR(modelDownloadBase: gigaamModelBase)
+        }
+    }
+
+    /// Переключает активный движок. Старый выгружается, новый создаётся,
+    /// callbacks переподписываются, запускается warmUp.
+    /// Caller гарантирует что запись НЕ идёт.
+    private func switchEngine(to choice: ModelChoice) {
+        qwenAppLog.notice("switchEngine → \(choice.rawValue)")
+        asr.shutdown()
+        asrReady = false
+        asrError = nil
+        asrStatus = "Переключаю модель…"
+        rebuildMenu()
+
+        let newEngine = Self.makeEngine(choice: choice, store: hotwords)
+        self.asr = newEngine
+        setupASRHandlers()   // переподписать onReadyChange/onError/onStatus на новый движок
+        newEngine.warmUp()
     }
 
     // MARK: - Lifecycle
@@ -246,24 +294,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupASRHandlers() {
         asr.onReadyChange = { [weak self] ready in
-            self?.asrReady = ready
-            if ready { self?.asrStatus = nil }
-            self?.rebuildMenu()
+            guard let self else { return }
+            self.asrReady = ready
+            if ready { self.asrStatus = nil }
+            self.applyMenuState()
         }
         asr.onError = { [weak self] msg in
-            self?.asrError = msg
-            self?.rebuildMenu()
+            guard let self else { return }
+            self.asrError = msg
+            self.applyMenuState()
         }
         asr.onStatus = { [weak self] msg in
             guard let self else { return }
             self.asrStatus = msg
-            // In-place update строки статуса в открытом меню — иначе % загрузки
-            // не отображается пока юзер не закроет/откроет меню.
-            if let item = self.asrStatusMenuItem {
-                item.title = "ASR: \(msg)"
+            self.applyMenuState()
+        }
+    }
+
+    /// Единая точка обновления меню при смене ASR-состояния.
+    ///
+    /// **Почему не просто `rebuildMenu`:** пока меню ОТКРЫТО, переприсвоение
+    /// `statusItem.menu` невидимо — AppKit продолжает показывать старый `NSMenu`
+    /// до закрытия. Поэтому при открытом меню мутируем живые `NSMenuItem`
+    /// in-place — `NSMenu` релэйаутит открытое меню при таких изменениях, и юзер
+    /// видит результат сразу, не переоткрывая. В закрытом — обычная пересборка.
+    private func applyMenuState() {
+        guard menuIsOpen else {
+            rebuildMenu()
+            return
+        }
+        updateLiveASRMenuItems()
+    }
+
+    /// In-place обновление статус-строки и кнопки старта в уже открытом меню.
+    /// При готовности модели строка статуса удаляется, а «Начать запись»
+    /// становится активной — всё без переоткрытия меню.
+    private func updateLiveASRMenuItems() {
+        let showStatusLine = !asrReady && asrError == nil
+        if let item = asrStatusMenuItem {
+            if showStatusLine {
+                item.title = asrStatus.map { "ASR: \($0)" } ?? "ASR: запускается…"
             } else {
-                self.rebuildMenu()
+                // Модель готова (или ошибка) — убираем строку из открытого меню.
+                item.menu?.removeItem(item)
+                asrStatusMenuItem = nil
             }
+        } else if showStatusLine {
+            // Строки нет в текущем меню — пересборка (невидима сейчас, корректна
+            // при следующем открытии). Редкий путь: меню открыли уже после ready.
+            rebuildMenu()
+        }
+        if let start = startMenuItem, !recorder.isRecording {
+            start.isEnabled = asrReady && !micPermissionDenied && hotkey.isAccessibilityGranted
         }
     }
 
@@ -719,6 +801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
 
         // 1. Главное действие: старт / стоп
+        startMenuItem = nil
         if recorder.isRecording {
             menu.addItem(NSMenuItem(
                 title: "Остановить (Esc)",
@@ -740,12 +823,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 && !micPermissionDenied
                 && hotkey.isAccessibilityGranted
             menu.addItem(startItem)
+            startMenuItem = startItem  // weak-ref для in-place isEnabled в открытом меню
         }
 
         // ASR-статус (между основным действием и Accessibility).
-        // Сохраняем weak-ref на NSMenuItem чтобы потом обновлять `.title` in-place
-        // (см. asr.onStatus в setupASRHandlers). Без in-place update прогресс
-        // загрузки модели не виден пока меню открыто.
+        // Сохраняем weak-ref на NSMenuItem чтобы потом обновлять `.title` или
+        // удалять строку in-place (см. `updateLiveASRMenuItems`). Без in-place
+        // update прогресс загрузки и переход в «готово» не видны пока меню открыто.
         asrStatusMenuItem = nil
         if !asrReady && asrError == nil {
             let title = asrStatus.map { "ASR: \($0)" } ?? "ASR: запускается…"
@@ -860,35 +944,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (нельзя свапнуть посреди транскрипции; нельзя стартовать второй swap
         // поверх первого — параллельные fromPretrained подерутся за кэш).
         let modelSubmenu = NSMenu()
-        // КРИТИЧНО: NSMenu по умолчанию `autoenablesItems = true`. AppKit сам
-        // валидирует items, ИГНОРИРУЯ ручное `isEnabled = false`. Из-за этого
-        // кнопки выглядели активными во время загрузки, юзер кликал, и swap
-        // ронялся внутрь себя. Отключаем auto-validation — теперь наш флаг
-        // honored AppKit'ом и пункты визуально серые во время swap.
+        // NSMenu по умолчанию `autoenablesItems = true` — AppKit игнорирует
+        // ручное `isEnabled = false`. Отключаем, чтобы пункты были серыми
+        // во время загрузки/записи (нельзя свапнуть посреди транскрипции).
         modelSubmenu.autoenablesItems = false
-        let isSwapping = (asr as? QwenASR)?.isSwapInProgress ?? false
-        let canSwitchModel = asrReady && !recorder.isRecording && !isSwapping
-        for choice in QwenModelChoice.allCases {
+        let canSwitchModel = asrReady && !recorder.isRecording
+        let currentChoice = ModelChoice(rawValue: hotwords.selectedModel) ?? .default
+        for choice in ModelChoice.allCases {
             let item = NSMenuItem(
                 title: choice.displayName,
                 action: #selector(setModel(_:)),
                 keyEquivalent: ""
             )
-            item.representedObject = choice.modelId
-            item.state = (hotwords.selectedModelId == choice.modelId) ? .on : .off
+            item.representedObject = choice.rawValue
+            item.state = (choice == currentChoice) ? .on : .off
             item.isEnabled = canSwitchModel
             item.target = self
             modelSubmenu.addItem(item)
         }
-        let currentModelName = QwenModelChoice.from(modelId: hotwords.selectedModelId)?.displayName ?? "?"
-        let modelHeaderTitle: String
-        if isSwapping {
-            modelHeaderTitle = "Модель: загрузка \(currentModelName)…"
-        } else {
-            modelHeaderTitle = "Модель: \(currentModelName)"
-        }
         let modelHeader = NSMenuItem(
-            title: modelHeaderTitle,
+            title: "Модель: \(currentChoice.displayName)",
             action: nil,
             keyEquivalent: ""
         )
@@ -1046,18 +1121,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func setModel(_ sender: NSMenuItem) {
-        guard let newModelId = sender.representedObject as? String else { return }
-        guard let qwen = asr as? QwenASR else { return }
-        guard newModelId != hotwords.selectedModelId else { return }
-        // Тройная защита: запись, swap-in-progress, и проверка modelId выше.
-        // Меню само disabled'ит варианты пока isReady=false, но юзер может
-        // успеть кликнуть до перерисовки.
+        guard let raw = sender.representedObject as? String,
+              let choice = ModelChoice(rawValue: raw) else { return }
+        guard raw != hotwords.selectedModel else { return }
+        // Нельзя свапнуть посреди записи (меню это и так disabled'ит, но юзер
+        // мог успеть кликнуть до перерисовки).
         guard !recorder.isRecording else { return }
-        guard !qwen.isSwapInProgress else { return }
 
-        hotwords.selectedModelId = newModelId
-        rebuildMenu()  // обновим галку + заголовок
-        qwen.swapModel(to: newModelId)
+        hotwords.selectedModel = raw
+        switchEngine(to: choice)
     }
 
     // MARK: - First-launch tour
@@ -1182,9 +1254,17 @@ extension AppDelegate: NSMenuDelegate {
     /// Срабатывает когда юзер кликает на menubar-иконку и наша menu раскрывается.
     /// Используем это как сигнал «пользователь нашёл иконку» и закрываем first-launch tour.
     func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
         if firstLaunchTourPanel != nil {
             dismissFirstLaunchTour()
         }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+        // Пока меню было открыто, мы обновляли только живые итемы. Пересобираем
+        // в закрытом состоянии, чтобы следующее открытие имело свежую структуру.
+        rebuildMenu()
     }
 }
 

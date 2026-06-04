@@ -52,16 +52,15 @@ final class HotwordsStore: ObservableObject {
 
     private static let firstLaunchTourKey = "Glagol.didShowFirstLaunchTour"
 
-    /// Выбранный пользователем размер модели Qwen3-ASR.
-    /// При смене старая модель удаляется с диска и качается новая
-    /// (см. `QwenASR.swapModel`).
-    @Published var selectedModelId: String {
+    /// Выбранная пользователем модель/движок (`ModelChoice.rawValue`).
+    /// При смене весь движок переключается (см. `AppDelegate.switchEngine`).
+    @Published var selectedModel: String {
         didSet {
-            UserDefaults.standard.set(selectedModelId, forKey: Self.selectedModelKey)
+            UserDefaults.standard.set(selectedModel, forKey: Self.selectedModelKey)
         }
     }
 
-    private static let selectedModelKey = "Glagol.selectedModelId"
+    private static let selectedModelKey = "Glagol.selectedModel"
 
     private let fileURL: URL
     private let bundleDefaultsURL: URL?
@@ -103,14 +102,13 @@ final class HotwordsStore: ObservableObject {
         // First-launch tour
         self.didShowFirstLaunchTour = UserDefaults.standard.bool(forKey: Self.firstLaunchTourKey)
 
-        // Выбор модели. Если в UserDefaults лежит «битый» id (не из списка
-        // поддерживаемых) — сбрасываем к дефолту (1.7B).
-        let storedModelId = UserDefaults.standard.string(forKey: Self.selectedModelKey)
-        let supportedIds = QwenModelChoice.allCases.map(\.modelId)
-        if let id = storedModelId, supportedIds.contains(id) {
-            self.selectedModelId = id
+        // Выбор модели. Если в UserDefaults лежит «битый» rawValue (не из
+        // списка поддерживаемых) — сбрасываем к дефолту.
+        let stored = UserDefaults.standard.string(forKey: Self.selectedModelKey)
+        if let raw = stored, ModelChoice(rawValue: raw) != nil {
+            self.selectedModel = raw
         } else {
-            self.selectedModelId = QwenModelChoice.large.modelId
+            self.selectedModel = ModelChoice.default.rawValue
         }
 
         reload()

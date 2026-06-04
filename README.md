@@ -11,7 +11,7 @@
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2015%2B-blue.svg)](#требования)
 [![Swift](https://img.shields.io/badge/Swift-6.0-orange.svg)](https://swift.org)
-[![ASR](https://img.shields.io/badge/ASR-Qwen3--ASR%201.7B-purple.svg)](https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-4bit)
+[![ASR](https://img.shields.io/badge/ASR-Qwen3--ASR%20%2B%20GigaAM%20v3-purple.svg)](#движки-распознавания)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 </div>
@@ -20,7 +20,7 @@
 
 ## Что это
 
-Менюбар-приложение для macOS, которое принимает диктовку и печатает её в активное поле любого приложения. Распознавание полностью локальное на твоей Apple Silicon — через **Qwen3-ASR-1.7B-4bit** (MLX) от Alibaba.
+Менюбар-приложение для macOS, которое принимает диктовку и печатает её в активное поле любого приложения. Распознавание полностью локальное на твоей Apple Silicon. На выбор — **три движка**: две модели **Qwen3-ASR** (Alibaba, MLX/GPU) для multilingual-речи с английскими терминами и **GigaAM v3** (Сбер, ONNX/CPU) — лёгкая модель топ-качества для чисто русской диктовки (см. [Движки распознавания](#движки-распознавания)).
 
 **Архитектура batch:** запись копится в памяти от старта до stop'а. Когда юзер останавливает запись (хоткей, Esc, или auto-stop по тишине), вся запись разом подаётся в Qwen-модель, результат печатается одним блоком.
 
@@ -28,7 +28,8 @@
 
 ## Возможности
 
-- **Полностью локально** — модель работает на Apple Silicon GPU через MLX. Никаких внешних API.
+- **Полностью локально** — модели работают на Apple Silicon (Qwen — GPU через MLX, GigaAM — CPU через ONNX Runtime). Никаких внешних API.
+- **Три движка на выбор** — переключение прямо из menubar-меню; выбор запоминается между запусками. Неактивный движок выгружается из памяти (экономия RAM)
 - **Кастомный хоткей** — двойной модификатор (⌃⌃ по умолчанию) или произвольное сочетание
 - **Floating overlay** — плавающая капсула во время диктовки (адаптация Aqua Voice): живой waveform реагирует на голос + кнопки пауза/продолжить и стоп
 - **Индикатор готовности** — menubar-иконка: жёлтая «готовлюсь» (железо раскручивается ~250мс) → красная «слушаю» (запись реально идёт). Начинаешь говорить по красной — первые слова не теряются
@@ -41,13 +42,27 @@
 - **Menubar-only** — никакой Dock-иконки, всегда под рукой
 - **Надёжная инжекция** — текст печатается через CGEvent с chunking'ом по 8 символов (работает в терминалах, IDE, чатах) и сбросом модификаторов (не ломается при остановке двойным Ctrl)
 
+## Движки распознавания
+
+Движок выбирается в menubar-меню (раздел «Модель»). Выбор сохраняется и применяется при следующем запуске. По умолчанию — Qwen 1.7B.
+
+| Модель | Движок | Размер | Сильна в | Особенности |
+|---|---|---|---|---|
+| **Точная** — Qwen3-ASR 1.7B *(по умолчанию)* | MLX / GPU | ~1.6 ГБ | Multilingual, IT-речь с английскими терминами | Code-switching из коробки (`Kubernetes`, `Cursor`). Лучшее качество |
+| **Быстрая** — Qwen3-ASR 0.6B | MLX / GPU | ~0.7 ГБ | То же, но быстрее и легче | Чуть ниже точность, заметно меньше памяти |
+| **Лёгкая** — GigaAM v3 (Сбер) | ONNX / CPU | ~0.22 ГБ | Чисто русская речь | Топ-качество русского, встроенная пунктуация и капитализация. **Только русский** — английские термины транслитерирует в кириллицу. Работает на CPU |
+
+**Когда что:** для русско-английской IT-диктовки — Qwen (1.7B точнее, 0.6B легче). Для чистого русского без иностранных слов — GigaAM: легче всех, быстрая, не нагружает GPU.
+
+Модели **скачиваются по требованию** при первом выборе (Qwen — в `~/Library/Caches/qwen3-speech/`, GigaAM — в `~/Library/Caches/glagol/gigaam-v3/`), в DMG не зашиты. GigaAM тянется напрямую с [HuggingFace](https://huggingface.co/csukuangfj/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16).
+
 ## Требования
 
 | | |
 |---|---|
 | **OS** | macOS 15+ (Sequoia, для MLState API в speech-swift) |
 | **CPU** | Apple Silicon — M1 / M2 / M3 / M4 |
-| **Свободное место** | ~1.6 ГБ под модель Qwen3-ASR-1.7B-4bit + кэш |
+| **Свободное место** | под кэш моделей: Qwen 1.7B ~1.6 ГБ / Qwen 0.6B ~0.7 ГБ / GigaAM v3 ~0.22 ГБ (качается только выбранная) |
 | **Разрешения** | Микрофон + Accessibility (для CGEvent-инжекции текста) |
 
 Для сборки: Xcode 16+ + Metal Toolchain (см. ниже).
@@ -81,7 +96,9 @@ MLX компилирует Metal-шейдеры через эту тулчейн
               │
    on stop / VAD-auto-stop:
               ↓  VAD-gate: достаточно голоса?
-          QwenASR.transcribe(audio: [Float]) async → String
+          BatchASR.transcribe(audio: [Float]) async → String
+              │     ├─ QwenASR     → speech-swift / MLX (GPU)
+              │     └─ GigaAMSherpaASR → sherpa-onnx / ONNX (CPU)
               ↓  prompt-leak фильтр (вырезание цепочек терминов / отброс)
           TextInjector (CGEvent → активное поле, chunks of 8 chars, flags=[])
 ```
@@ -91,8 +108,10 @@ MLX компилирует Metal-шейдеры через эту тулчейн
 | Файл | Назначение |
 |---|---|
 | `BatchASR.swift` | Port (Protocol) для batch ASR-движка — `transcribe(audio:) → String` |
-| `QwenASR.swift` | Адаптер Qwen3-ASR через speech-swift / MLX |
-| `QwenModelChoice.swift` | UI-выбор размера модели (0.6B / 1.7B) |
+| `QwenASR.swift` | Адаптер Qwen3-ASR через speech-swift / MLX (GPU) |
+| `GigaAMSherpaASR.swift` | Адаптер GigaAM v3 через sherpa-onnx / ONNX Runtime (CPU) + загрузчик модели с прогрессом |
+| `SherpaOnnx.swift` | Swift-обёртка над C-API sherpa-onnx (offline transducer recognizer) |
+| `ModelChoice.swift` | Плоский enum выбора модели/движка (Qwen 1.7B / 0.6B / GigaAM) |
 | `AudioRecorder.swift` | AVAudioEngine pipeline, накопление сэмплов, audioLevel, VAD auto-stop, pause/resume |
 | `DictationOverlay.swift` | Плавающая капсула (SwiftUI waveform + кнопки) в non-activating NSPanel |
 | `HotkeyManager.swift` | CGEventTap, кастомный hotkey-recording panel |
@@ -147,10 +166,12 @@ MLX компилирует Metal-шейдеры через эту тулчейн
 - **[QwenLM/Qwen3-ASR](https://huggingface.co/Qwen)** ([Alibaba](https://github.com/QwenLM)) — Qwen3-ASR модель (SOTA open-source ASR 2026)
 - **[soniqo/speech-swift](https://github.com/soniqo/speech-swift)** — Swift wrapper для Qwen3-ASR через MLX
 - **[ml-explore/mlx](https://github.com/ml-explore/mlx)** ([Apple](https://github.com/apple)) — ML framework для Apple Silicon
+- **[GigaAM](https://github.com/salute-developers/GigaAM)** ([Сбер / SaluteDevelopers](https://github.com/salute-developers)) — GigaAM v3 ASR-модель для русского
+- **[k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)** — ONNX-рантайм для offline-распознавания + конвертация GigaAM ([@csukuangfj](https://huggingface.co/csukuangfj))
 - **[SF Symbols](https://developer.apple.com/sf-symbols/)** — иконка `waveform` (Apple)
 
 ## Лицензия
 
 [MIT](LICENSE) © 2026 Artem Sakovskii
 
-Модель Qwen3-ASR распространяется по лицензии Apache 2.0. См. её репозиторий на HuggingFace.
+Модель Qwen3-ASR распространяется по лицензии Apache 2.0, GigaAM v3 — по лицензии MIT (Сбер). См. их репозитории на HuggingFace.
