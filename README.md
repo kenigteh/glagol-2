@@ -13,6 +13,13 @@
 [![Swift](https://img.shields.io/badge/Swift-6.0-orange.svg)](https://swift.org)
 [![ASR](https://img.shields.io/badge/ASR-Qwen3--ASR%20%2B%20GigaAM%20v3-purple.svg)](#движки-распознавания)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Boosty](https://img.shields.io/badge/Boosty-поддержать%20проект-f15f2c.svg)](https://boosty.to/sakovskii/donate)
+
+<br/>
+
+<img src="assets/overlay.png" alt="Glagol overlay во время диктовки" width="300" />
+
+<sub>Плавающая капсула во время диктовки: живой waveform + пауза/стоп</sub>
 
 </div>
 
@@ -169,6 +176,14 @@ MLX компилирует Metal-шейдеры через эту тулчейн
 - **[GigaAM](https://github.com/salute-developers/GigaAM)** ([Сбер / SaluteDevelopers](https://github.com/salute-developers)) — GigaAM v3 ASR-модель для русского
 - **[k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)** — ONNX-рантайм для offline-распознавания + конвертация GigaAM ([@csukuangfj](https://huggingface.co/csukuangfj))
 - **[SF Symbols](https://developer.apple.com/sf-symbols/)** — иконка `waveform` (Apple)
+
+## ❤️ Поддержать проект
+
+Glagol бесплатный, без рекламы и подписок, и таким останется. Если он экономит тебе время — можно поддержать развитие: новые фичи, новые языки и подпись Apple (чтобы установка была в один клик, без предупреждений Gatekeeper).
+
+<a href="https://boosty.to/sakovskii/donate"><img src="https://img.shields.io/badge/Boosty-поддержать%20проект-f15f2c?style=for-the-badge" alt="Поддержать на Boosty" /></a>
+
+👉 **https://boosty.to/sakovskii/donate**
 
 ## Лицензия
 
