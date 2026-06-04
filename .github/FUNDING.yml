@@ -1,0 +1,3 @@
+# Кнопка «Sponsor» в шапке репозитория.
+# Boosty нет в списке поддерживаемых платформ → указываем через custom URL.
+custom: ["https://boosty.to/sakovskii/donate"]
