@@ -3,6 +3,9 @@ import OSLog
 // speech-swift (SPM): https://github.com/soniqo/speech-swift
 // `@preconcurrency` глушит Swift 6 Sendable-варнинги на `Qwen3ASRModel`.
 @preconcurrency import Qwen3ASR
+// MLX (транзитивная зависимость speech-swift, добавлена явным product'ом).
+// Нужна для GPU.clearCache() — освобождения накопленного GPU-кэша.
+import MLX
 
 private let qwenLog = Logger(subsystem: "com.sakovskii.glagol", category: "qwen-asr")
 
@@ -199,6 +202,19 @@ final class QwenASR: BatchASR {
         let inputAudio = audio
         let ctxParam = context.isEmpty ? nil : context
 
+        // **maxTokens — критично для длинных диктовок.** Дефолт speech-swift
+        // = 448 токенов: декодер останавливается на 448-м токене, обрезая
+        // длинный текст. Считаем потолок из длины аудио.
+        //
+        // Коэффициент 10 ток/сек — эмпирический: замер реальным Qwen-токенайзером
+        // на ОЧЕНЬ быстрой диктовке (222 слова/мин, русский литературный — самый
+        // токеноёмкий, 2.17 ток/слово) дал 8.0 ток/сек. +25% запас = 10.
+        // Минимум 512 — для коротких записей. Декодер всё равно остановится на
+        // <eos> раньше для реальной речи (потолок не замедляет короткие записи),
+        // а на runaway-loop ограничивает генерацию пропорционально длине.
+        let durationSec = Double(audio.count) / Double(Self.sampleRate)
+        let maxTokens = max(512, Int(durationSec * 10.0))
+
         return try await withCheckedThrowingContinuation { continuation in
             workQueue.async { [weak self] in
                 guard let self else {
@@ -219,10 +235,21 @@ final class QwenASR: BatchASR {
                     audio: inputAudio,
                     sampleRate: Self.sampleRate,
                     language: nil,
+                    maxTokens: maxTokens,
                     context: ctxParam
                 ).trimmingCharacters(in: .whitespacesAndNewlines)
                 let took = Date().timeIntervalSince(t0)
-                qwenLog.notice("[Qwen] transcribe done in \(took, privacy: .public)s → '\(text, privacy: .public)'")
+
+                // **Освобождаем накопленный GPU-кэш MLX.** Без этого MLX держит
+                // переиспользуемые Metal-буферы всех встреченных размеров записей
+                // (cacheMemory) — за часы работы они раздувались до десятков ГБ,
+                // выдавливая систему в swap и роняя скорость в десятки раз.
+                // clearCache() сбрасывает только cacheMemory; веса модели
+                // (activeMemory) не трогаются. Между transcribe-вызовами кэш не
+                // нужен, так что очистка безопасна и не замедляет inference.
+                let cacheBefore = MLX.GPU.cacheMemory
+                MLX.GPU.clearCache()
+                qwenLog.notice("[Qwen] transcribe done in \(took, privacy: .public)s, cleared GPU cache \(cacheBefore / 1024 / 1024, privacy: .public)MB → '\(text, privacy: .public)'")
                 continuation.resume(returning: text)
             }
         }

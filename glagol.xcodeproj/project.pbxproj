@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		1750DA342FB391B400312FB3 /* Qwen3ASR in Frameworks */ = {isa = PBXBuildFile; productRef = 1750DA332FB391B400312FB3 /* Qwen3ASR */; };
+		17BBBB002FB400000000000A /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = 17BBBB012FB400000000000B /* MLX */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +29,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1750DA342FB391B400312FB3 /* Qwen3ASR in Frameworks */,
+				17BBBB002FB400000000000A /* MLX in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,6 +73,7 @@
 			name = glagol;
 			packageProductDependencies = (
 				1750DA332FB391B400312FB3 /* Qwen3ASR */,
+				17BBBB012FB400000000000B /* MLX */,
 			);
 			productName = glagol;
 			productReference = 1718B3892FB0CB0B00E2CA14 /* glagol.app */;
@@ -102,6 +105,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				1750DA322FB391B400312FB3 /* XCRemoteSwiftPackageReference "speech-swift" */,
+				17BBBB022FB400000000000C /* XCRemoteSwiftPackageReference "mlx-swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1718B38A2FB0CB0B00E2CA14 /* Products */;
@@ -350,6 +354,14 @@
 				kind = branch;
 			};
 		};
+		17BBBB022FB400000000000C /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.30.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -357,6 +369,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 1750DA322FB391B400312FB3 /* XCRemoteSwiftPackageReference "speech-swift" */;
 			productName = Qwen3ASR;
+		};
+		17BBBB012FB400000000000B /* MLX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 17BBBB022FB400000000000C /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLX;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

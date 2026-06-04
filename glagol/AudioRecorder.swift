@@ -61,8 +61,10 @@ final class AudioRecorder: ObservableObject {
 
     private static let inputTapBufferSize: AVAudioFrameCount = 4096
     /// Лимит длины записи — защита от утечки памяти если юзер забыл стоп.
-    /// 5 минут × 16000 Hz × 4 байта = 19 МБ — приемлемо.
-    private static let maxRecordingSec: Double = 300.0
+    /// 15 минут × 16000 Hz × 4 байта = ~58 МБ — приемлемо. На практике
+    /// auto-stop по тишине (7-30с) останавливает гораздо раньше; этот лимит —
+    /// предохранитель для забытой записи / длинных монологов.
+    private static let maxRecordingSec: Double = 900.0
 
     /// Инструментация задержки старта: момент вызова `start()` и флаг что
     /// первый буфер ещё не пришёл (чтобы залогировать разовую задержку).
