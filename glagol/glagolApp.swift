@@ -333,7 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let showStatusLine = !asrReady && asrError == nil
         if let item = asrStatusMenuItem {
             if showStatusLine {
-                item.title = asrStatus.map { "ASR: \($0)" } ?? "ASR: запускается…"
+                item.title = asrStatus.map { "\($0)" } ?? "Запускается…"
             } else {
                 // Модель готова (или ошибка) — убираем строку из открытого меню.
                 item.menu?.removeItem(item)
@@ -832,7 +832,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // update прогресс загрузки и переход в «готово» не видны пока меню открыто.
         asrStatusMenuItem = nil
         if !asrReady && asrError == nil {
-            let title = asrStatus.map { "ASR: \($0)" } ?? "ASR: запускается…"
+            let title = asrStatus.map { "\($0)" } ?? "Запускается…"
             let s = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             s.isEnabled = false
             menu.addItem(s)

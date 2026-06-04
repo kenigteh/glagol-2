@@ -81,6 +81,17 @@ final class QwenASR: BatchASR {
 
     // MARK: - BatchASR
 
+    /// Сообщение прогресса загрузки модели.
+    ///
+    /// speech-swift отдаёт `fraction` вне диапазона 0..1 (видели ~20 → «2000%»),
+    /// а `status`-строку — на английском («downloading model»). Поэтому
+    /// англоязычный текст игнорируем, а процент показываем только когда он
+    /// осмысленный (0..100); иначе — нейтральное «Загрузка модели…».
+    private static func loadProgressMessage(fraction: Double) -> String {
+        let pct = Int((fraction * 100).rounded())
+        return (0...100).contains(pct) ? "Загрузка модели: \(pct)%" : "Загрузка модели…"
+    }
+
     func warmUp() {
         emitStatus("Загрузка модели…")
         qwenLog.notice("[Qwen] warmUp start, model=\(self.modelId, privacy: .public)")
@@ -89,13 +100,8 @@ final class QwenASR: BatchASR {
                 let t0 = Date()
                 let m = try await Qwen3ASRModel.fromPretrained(
                     modelId: modelId,
-                    progressHandler: { [weak self] fraction, status in
-                        let pct = Int(fraction * 100)
-                        let trimmed = status.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let msg = trimmed.isEmpty
-                            ? "Загрузка модели: \(pct)%"
-                            : "Загрузка модели: \(pct)% — \(trimmed)"
-                        self?.emitStatus(msg)
+                    progressHandler: { [weak self] fraction, _ in
+                        self?.emitStatus(Self.loadProgressMessage(fraction: Double(fraction)))
                     }
                 )
                 let took = Date().timeIntervalSince(t0)
@@ -146,13 +152,8 @@ final class QwenASR: BatchASR {
                 let t0 = Date()
                 let m = try await Qwen3ASRModel.fromPretrained(
                     modelId: newModelId,
-                    progressHandler: { [weak self] fraction, status in
-                        let pct = Int(fraction * 100)
-                        let trimmed = status.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let msg = trimmed.isEmpty
-                            ? "Загрузка модели: \(pct)%"
-                            : "Загрузка модели: \(pct)% — \(trimmed)"
-                        self?.emitStatus(msg)
+                    progressHandler: { [weak self] fraction, _ in
+                        self?.emitStatus(Self.loadProgressMessage(fraction: Double(fraction)))
                     }
                 )
                 qwenLog.notice("[Qwen] swap fromPretrained ok in \(Date().timeIntervalSince(t0), privacy: .public)s")
